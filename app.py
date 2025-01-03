@@ -2,10 +2,9 @@ import uvicorn
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 import cv2
-from pyzbar.pyzbar import decode
 from ultralytics import YOLO
-import numpy as np
 import tempfile
+import zxing
 
 # Initialize FastAPI app
 app = FastAPI()
@@ -22,38 +21,17 @@ app.add_middleware(
 # Load the YOLOv8n model
 model = YOLO('barcode.pt')
 
-# Function to rotate the image by a given angle
-def rotate_image(image, angle):
-    (h, w) = image.shape[:2]
-    center = (w // 2, h // 2)
+# Function to decode barcode using ZXing
+def decode_barcode_with_zxing(image_path):
+    # Initialize ZXing Barcode Reader
+    reader = zxing.BarCodeReader()
+    barcode = reader.decode(image_path)
 
-    # Generate a rotation matrix
-    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-
-    # Perform the rotation
-    rotated = cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
-    return rotated
-
-# Function to decode barcodes from a rotated image
-def decode_rotated_barcode(region):
-    for angle in range(0, 360, 30):  # Rotate in 30-degree intervals
-        rotated_region = rotate_image(region, angle)
-
-        # Convert to grayscale and preprocess
-        gray = cv2.cvtColor(rotated_region, cv2.COLOR_BGR2GRAY)
-        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-        # Decode barcodes
-        detectedBarcodes = decode(thresh)
-
-        if detectedBarcodes:
-            for barcode in detectedBarcodes:
-                if barcode.data:
-                    return {
-                        "data": barcode.data.decode('utf-8'),
-                        "type": barcode.type,
-                        "image": rotated_region
-                    }
+    if barcode:
+        return {
+            "data": barcode.raw,
+            "type": barcode.format
+        }
     return None
 
 @app.get('/')
@@ -88,14 +66,19 @@ async def decode_image(file: UploadFile = File(...)):
                 # Extract the barcode region
                 barcode_region = frame[y1:y2, x1:x2]
 
-                # Attempt to decode barcode with rotation
-                decoded = decode_rotated_barcode(barcode_region)
-                if decoded:
-                    barcodes_info.append({
-                        "data": decoded["data"],
-                        "type": decoded["type"]
-                    })
-                    barcode_detected = True
+                # Save the region to a temporary file
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as region_file:
+                    cv2.imwrite(region_file.name, barcode_region)
+
+                    # Decode the barcode using ZXing
+                    decoded = decode_barcode_with_zxing(region_file.name)
+
+                    if decoded:
+                        barcodes_info.append({
+                            "data": decoded["data"],
+                            "type": decoded["type"]
+                        })
+                        barcode_detected = True
 
         # Response
         if barcode_detected:
