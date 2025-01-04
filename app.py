@@ -1,96 +1,87 @@
-import uvicorn
-from fastapi import FastAPI, File, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
+from flask import Flask, request, jsonify
 import cv2
 from ultralytics import YOLO
-import tempfile
-import zxing
+import numpy as np
+import pyzxing
+import os
 
-# Initialize FastAPI app
-app = FastAPI()
+# Initialize Flask app
+app = Flask(__name__)
 
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Load a pretrained YOLOv8n model
+model = YOLO('/content/barcode.pt')
 
-# Load the YOLOv8n model
-model = YOLO('barcode.pt')
+# Initialize the ZXing decoder
+reader = pyzxing.BarCodeReader()
 
-# Function to decode barcode using ZXing
-def decode_barcode_with_zxing(image_path):
-    # Initialize ZXing Barcode Reader
-    reader = zxing.BarCodeReader()
-    barcode = reader.decode(image_path)
+# Function to rotate the image by a given angle
+def rotate_image(image, angle):
+    (h, w) = image.shape[:2]
+    center = (w // 2, h // 2)
 
-    if barcode:
-        return {
-            "data": barcode.raw,
-            "type": barcode.format
-        }
+    # Generate a rotation matrix
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+
+    # Perform the rotation
+    rotated = cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
+    return rotated
+
+# Function to decode barcodes from a rotated image
+def decode_rotated_barcode(region):
+    for angle in range(0, 360, 30):  # Rotate in 30-degree intervals
+        rotated_region = rotate_image(region, angle)
+
+        # Convert rotated region to a temporary file for ZXing processing
+        temp_filename = 'temp_rotated.png'
+        cv2.imwrite(temp_filename, rotated_region)
+
+        # Decode barcodes using ZXing
+        results = reader.decode(temp_filename)
+        if results:
+            os.remove(temp_filename)  # Clean up temporary file
+            for result in results:
+                if result.get('raw', ''):
+                    return {
+                        'data': result['raw'],
+                        'format': result['format'],
+                        'angle': angle
+                    }
+    os.remove(temp_filename)  # Clean up temporary file if no barcode found
     return None
 
-@app.get('/')
-def index():
-    return {"message": "Barcode Detection API - Upload an image to /decode"}
+@app.route('/decode-barcode', methods=['POST'])
+def decode_barcode():
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
 
-@app.post('/decode')
-async def decode_image(file: UploadFile = File(...)):
-    try:
-        # Read the uploaded image
-        contents = await file.read()
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
-            temp_file.write(contents)
-            temp_file_path = temp_file.name
+    # Read the uploaded image
+    image_file = request.files['image']
+    image = cv2.imdecode(np.frombuffer(image_file.read(), np.uint8), cv2.IMREAD_COLOR)
 
-        # Load the image using OpenCV
-        frame = cv2.imread(temp_file_path)
+    # Run inference on the image
+    results = model(image)
 
-        # Run YOLO inference
-        results = model(frame)
+    # Access bounding boxes for the detected objects
+    barcodes = []
+    for r in results:
+        boxes = r.boxes.xyxy.cpu().numpy()
 
-        barcode_detected = False
-        barcodes_info = []
+        # Process each detected region
+        for box in boxes:
+            x1, y1, x2, y2 = map(int, box)
 
-        # Access bounding boxes for the detected objects
-        for r in results:
-            boxes = r.boxes.xyxy.cpu().numpy()
+            # Extract the barcode region
+            barcode_region = image[y1:y2, x1:x2]
 
-            for box in boxes:
-                x1, y1, x2, y2 = map(int, box)
+            # Attempt to decode barcode with rotation
+            decoded_data = decode_rotated_barcode(barcode_region)
+            if decoded_data:
+                barcodes.append(decoded_data)
 
-                # Extract the barcode region
-                barcode_region = frame[y1:y2, x1:x2]
+    if not barcodes:
+        return jsonify({'message': 'No barcodes were successfully decoded.'}), 404
 
-                # Save the region to a temporary file
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as region_file:
-                    cv2.imwrite(region_file.name, barcode_region)
-
-                    # Decode the barcode using ZXing
-                    decoded = decode_barcode_with_zxing(region_file.name)
-
-                    if decoded:
-                        barcodes_info.append({
-                            "data": decoded["data"],
-                            "type": decoded["type"]
-                        })
-                        barcode_detected = True
-
-        # Response
-        if barcode_detected:
-            return {
-                "message": "Barcodes decoded successfully.",
-                "barcodes": barcodes_info
-            }
-        else:
-            return {"message": "No barcodes were successfully decoded."}
-
-    except Exception as e:
-        return {"error": str(e)}
+    return jsonify({'barcodes': barcodes}), 200
 
 if __name__ == '__main__':
-    uvicorn.run(app, host='127.0.0.1', port=8000)
+    app.run(host='0.0.0.0', port=5000)
