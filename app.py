@@ -1,54 +1,73 @@
 from fastapi import FastAPI, File, UploadFile
-from pyzbar.pyzbar import decode
-import cv2
-import numpy as np
-from io import BytesIO
-from fastapi.responses import JSONResponse
-import uvicorn
+from fastapi.middleware.cors import CORSMiddleware
+import google.generativeai as genai
+import tempfile
+import json
 
-# Initialize FastAPI app
+# Initialize FastAPI and Gemini
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Function to process and detect barcodes from the image
-def process_barcode(img: BytesIO):
-    # Convert the uploaded image into a format suitable for OpenCV (numpy array)
-    image = np.array(bytearray(img.read()), dtype=np.uint8)
-    image = cv2.imdecode(image, cv2.IMREAD_COLOR)
+# Configure Gemini API
+genai.configure(api_key='AIzaSyBXC_o3DTYBLbVBOLoQHCOQtXVA_DCqp-o')
 
-    # Decode barcodes in the image using pyzbar
-    barcodes = decode(image)
-    barcode_dict = {}
+@app.post("/scan")
+async def scan_image(file: UploadFile = File(...)):
+    try:
+        # Read and save the uploaded image
+        contents = await file.read()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
+            temp_file.write(contents)
+            temp_file_path = temp_file.name
+        
+        # Upload to Gemini
+        image_file = genai.upload_file(temp_file_path)
+        
+        # Create Gemini model and prompt
+        model = genai.GenerativeModel('gemini-1.5-pro')
+        prompt = """Analyze this image for barcodes and provide only the following details in valid JSON format:
+        {
+            "barcodes": [
+                {
+                    "type": "barcode type (e.g., QR, EAN-13, etc.)",
+                    "content": "decoded content",
+                    "location": "location in image",
+                    "quality": "scan quality"
+                }
+            ]
+        }
+        If no barcodes are found, return: {"barcodes": []}"""
+        
+        # Get response from Gemini
+        response = model.generate_content([image_file, prompt])
+        response_text = response.text.strip()
+        
+        # Clean up response if it contains markdown code blocks
+        if response_text.startswith("```json"):
+            response_text = response_text[7:-3].strip()
+        elif response_text.startswith("```"):
+            response_text = response_text[3:-3].strip()
+            
+        # Parse JSON response
+        try:
+            result = json.loads(response_text)
+        except json.JSONDecodeError:
+            # If JSON parsing fails, return a default structure
+            result = {"barcodes": []}
+        
+        return {
+            "filename": file.filename,
+            "results": result
+        }
+        
+    except Exception as e:
+        return {"error": f"Processing error: {str(e)}"}
 
-    # Loop over detected barcodes and store results in a dictionary
-    for barcode in barcodes:
-        (x, y, w, h) = barcode.rect
-        cv2.rectangle(image, (x, y), (x + w, y + h), (0, 0, 255), 2)
-
-        barcode_data = barcode.data.decode("utf-8")
-        barcode_type = barcode.type
-
-        # Append data to the dictionary
-        barcode_dict[barcode_data] = barcode_type
-        print(f"[INFO] Found {barcode_type} barcode: {barcode_data}")
-    
-    return barcode_dict
-
-# API endpoint to handle barcode detection from an uploaded image
-@app.post("/decode-barcode")
-async def decode_barcode(image: UploadFile = File(...)):
-    # Read image content
-    img = await image.read()
-
-    # Process barcode detection
-    barcode_data = process_barcode(BytesIO(img))
-
-    if barcode_data:
-        return JSONResponse(content=barcode_data)
-    else:
-        return JSONResponse(content={"message": "No barcodes detected"}, status_code=404)
-
-# Add this block for running the app locally
 if __name__ == "__main__":
-    # This is for local development
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=5000)
