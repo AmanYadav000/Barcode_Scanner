@@ -1,7 +1,6 @@
 fastapi
 uvicorn
+pyzbar
 opencv-python-headless
-ultralytics
-pyzxing
 numpy
 python-multipart
