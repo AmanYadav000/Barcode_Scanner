@@ -10,7 +10,7 @@ import os
 app = FastAPI()
 
 # Load a pretrained YOLOv8n model
-model = YOLO("/content/barcode.pt")
+model = YOLO("barcode.pt")
 
 # Initialize the ZXing decoder
 reader = pyzxing.BarCodeReader()
