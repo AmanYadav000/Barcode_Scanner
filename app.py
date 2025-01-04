@@ -60,10 +60,7 @@ async def scan_image(file: UploadFile = File(...)):
             # If JSON parsing fails, return a default structure
             result = {"barcodes": []}
         
-        return {
-            "filename": file.filename,
-            "results": result
-        }
+        return result
         
     except Exception as e:
         return {"error": f"Processing error: {str(e)}"}
