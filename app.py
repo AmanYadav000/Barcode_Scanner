@@ -14,7 +14,7 @@ app.add_middleware(
 )
 
 # Configure Gemini API
-genai.configure(api_key='AIzaSyBXC_o3DTYBLbVBOLoQHCOQtXVA_DCqp-o')
+genai.configure(api_key='AIzaSyC0l-ACACcNCpezpeM1zxFLxkvtcuWycPM')
 
 @app.post("/scan")
 async def scan_image(file: UploadFile = File(...)):
